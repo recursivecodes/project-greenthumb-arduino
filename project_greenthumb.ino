@@ -34,7 +34,7 @@
 #define S3 D3
 #define SIG A0 
 
-const long utcOffsetInSeconds = -18000;
+const long utcOffsetInSeconds = -14400;
 int dayTemp = 80;
 int morningTemp = 75;
 int nightTemp = 70;
@@ -182,12 +182,22 @@ void loop(){
 
   // after 5am, starting warming soil back up
   // between 7a and 9p, keep soil at dayTemp 
-  if( currentHour > 5 && currentHour < 21 ) {
+  if( currentHour >= 5 && currentHour <= 7 ) {
     if( relayState == HIGH && probeTempF > (dayTemp + 2) ) {
       relayState = LOW;
       digitalWrite(RELAY_PIN, LOW);
     }
     if(relayState == LOW && probeTempF < (morningTemp - 2) ) {
+      relayState = HIGH;
+      digitalWrite(RELAY_PIN, HIGH);
+    }
+  }
+  if( currentHour >= 7 && currentHour <= 21 ) {
+    if( relayState == HIGH && probeTempF > (dayTemp + 2) ) {
+      relayState = LOW;
+      digitalWrite(RELAY_PIN, LOW);
+    }
+    if(relayState == LOW && probeTempF < (dayTemp - 2) ) {
       relayState = HIGH;
       digitalWrite(RELAY_PIN, HIGH);
     }
