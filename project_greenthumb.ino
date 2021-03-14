@@ -182,6 +182,7 @@ void loop(){
 
   // after 5am, starting warming soil back up
   // between 7a and 9p, keep soil at dayTemp 
+  /*
   if( currentHour >= 5 && currentHour <= 7 ) {
     if( relayState == HIGH && probeTempF > (dayTemp + 2) ) {
       relayState = LOW;
@@ -192,6 +193,7 @@ void loop(){
       digitalWrite(RELAY_PIN, HIGH);
     }
   }
+  */
   if( currentHour >= 7 && currentHour <= 21 ) {
     if( relayState == HIGH && probeTempF > (dayTemp + 2) ) {
       relayState = LOW;
