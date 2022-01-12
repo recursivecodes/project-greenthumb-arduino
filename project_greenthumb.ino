@@ -10,8 +10,7 @@
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include <ESP8266WiFi.h>
-#include "Adafruit_MQTT.h"
-#include "Adafruit_MQTT_Client.h"
+#include "EspMQTTClient.h"
 #include <ArduinoJson.h>
 #include <ArduinoOTA.h>
 #include <TelnetStream.h>
@@ -23,6 +22,7 @@
 #define SCREEN_ADDRESS 0x3C 
 #define DHT11_PIN 10
 #define RELAY_PIN D6
+#define PUMP_PIN D7
 #define PROBE_THERMOMETER D4
 #define WATER_SENSOR A0
 #define OLED_SCL D7
@@ -34,27 +34,53 @@
 #define S3 D3
 #define SIG A0 
 
-const long utcOffsetInSeconds = -14400;
+#define ENCODER_1 D3
+#define ENCODER_2 D5
+
+volatile int lastEncoded = 0;
+volatile long waterLow = 50;
+
+const long utcOffsetInSeconds = -18000;
+long pumpStart = 0;
+long pumpDuration = 5000;
+long pumpDelay = 10000;
+int pumpState = LOW;
 int dayTemp = 80;
-int morningTemp = 75;
 int nightTemp = 70;
 int incomingByte = 0;
 int light;
 int moisture;
 int relayState;
 
+// global variables 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 dht DHT;
 OneWire oneWire(PROBE_THERMOMETER);
 DallasTemperature probeThermometer(&oneWire);
-WiFiClient client;
-Adafruit_MQTT_Client mqtt(&client, RABBIT_SERVER, RABBIT_PORT, RABBIT_USER, RABBIT_PASSWORD);
-Adafruit_MQTT_Publish readingsTopic = Adafruit_MQTT_Publish(&mqtt, "greenthumb/readings");
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "pool.ntp.org", utcOffsetInSeconds);
 TwoWire Wire1 = TwoWire();
 BH1750 lightMeter;
 
+// MQTT topic/clientId/client
+const char* greenthumbTopic = "greenthumb/readings";
+const char* greenthumbClientId = "greenthumb_arduino";
+
+EspMQTTClient mqttClient(
+  ssid,
+  password,
+  MQTT_SERVER,
+  MQTT_USER,
+  MQTT_PASSWORD,
+  greenthumbClientId
+);
+
+// MQTT connection callback
+void onConnectionEstablished() {
+  TelnetStream.println("MQTT Connected!");
+}
+
+// initialize Over The Air for updating via HTTP connection
 void initOta(){
   ArduinoOTA.onStart([]() {
     String type;
@@ -63,8 +89,6 @@ void initOta(){
     } else { // U_FS
       type = "filesystem";
     }
-
-    // NOTE: if updating FS this would be the place to unmount FS using FS.end()
     TelnetStream.println("Start updating " + type);
   });
   ArduinoOTA.onEnd([]() {
@@ -93,19 +117,26 @@ void initOta(){
 void setup(){
   Serial.begin(115200);
   TelnetStream.begin();
-  pinMode(RELAY_PIN, OUTPUT);
 
+  // setup pins
+  pinMode(RELAY_PIN, OUTPUT);
+  pinMode(PUMP_PIN, OUTPUT);
   pinMode(S0,OUTPUT);        
   pinMode(S1,OUTPUT);
   pinMode(S2,OUTPUT);
-  pinMode(S3,OUTPUT);
   pinMode(SIG, INPUT); 
+  pinMode(ENCODER_1, INPUT_PULLUP);
+  pinMode(ENCODER_2, INPUT_PULLUP);
+  attachInterrupt(ENCODER_1, updateEncoder, RISING);
+  attachInterrupt(ENCODER_2, updateEncoder, RISING);
 
+  // handle display errors
   if(!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
     TelnetStream.println(F("SSD1306 allocation failed"));
     for(;;); // Don't proceed, loop forever
   }
 
+  // setup display
   display.clearDisplay();
   display.setTextSize(1);            
   display.setTextColor(SSD1306_WHITE);
@@ -114,6 +145,7 @@ void setup(){
   display.print(conMsg);
   display.display();
     
+  // connect to WiFi network
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
   while (WiFi.status() != WL_CONNECTED) { 
@@ -134,6 +166,7 @@ void setup(){
   display.display();
   delay(1000);
 
+  // init time client and light meter
   timeClient.begin();
   Wire1.begin();
   lightMeter.begin(BH1750::CONTINUOUS_HIGH_RES_MODE, 0x23, &Wire1);
@@ -141,28 +174,58 @@ void setup(){
 
 void loop(){
   ArduinoOTA.handle();
-  
+
   timeClient.update();
   
+  // read air temp & humidity
   int chk = DHT.read11(DHT11_PIN);
   String airTempMsg = "Air: " + String((int) cToF(DHT.temperature)) + "F (" + String((int) DHT.temperature) + "C)";
   String humidityMsg = "Humidity: " + String((int) DHT.humidity) + "%";
 
+  // read soil temp
   probeThermometer.requestTemperatures(); 
   float probeTempC = probeThermometer.getTempCByIndex(0);
   float probeTempF = probeThermometer.toFahrenheit(probeTempC);
   String probeTempMsg = "Soil: " + String((int) probeTempF) + "F (" + String((int) probeTempC) + "C)";
   
+  // read soil moisture
   moisture = analogRead(WATER_SENSOR);
   float moisturePct = map(moisture,30,600,0,100);
   if( moisturePct < 0 ){
     moisturePct = 0; 
   }
-  String moistureMsg = "Moisture: " + String((int) moisturePct) + "%";
-  
+  String moistureMsg = "Moist: " + String((int) moisturePct) + "%";
+  String waterMsg = "Target: " + String((int) waterLow) + "%";
+
+  // toggle pump, if necessary
+  if(moisturePct < waterLow) {
+    int _now = millis();
+    int pumpRuntime = _now - pumpStart;
+
+    if( pumpState == LOW ) {
+      if(pumpRuntime >= (pumpDelay+pumpDuration)) {
+        pumpState = HIGH;
+        pumpStart = millis();
+        digitalWrite(PUMP_PIN, HIGH);        
+      }
+    }
+    else {
+      if( pumpRuntime >= pumpDuration ) {
+        digitalWrite(PUMP_PIN, LOW);
+        pumpState = LOW;
+      }
+    }
+  }
+  else {
+    pumpState = LOW;
+    digitalWrite(PUMP_PIN, LOW); // FAIL SAFE - pump should be off here!
+  }
+
+  // read light level
   uint16_t lux = lightMeter.readLightLevel();
   String lightMsg = "Light: " + String(lux) + " lux";
   
+  // update display with latest readings
   display.clearDisplay();
   display.setTextSize(1);            
   display.setTextColor(SSD1306_WHITE);        
@@ -174,26 +237,14 @@ void loop(){
   display.println(humidityMsg);
   display.setCursor(0,30);
   display.println(moistureMsg);
+  display.setCursor(65,30);
+  display.println(waterMsg);
   display.setCursor(0,40);
   display.println(lightMsg);
 
   int currentHour = timeClient.getHours();
-  TelnetStream.println(timeClient.getFormattedTime());
 
-  // after 5am, starting warming soil back up
   // between 7a and 9p, keep soil at dayTemp 
-  /*
-  if( currentHour >= 5 && currentHour <= 7 ) {
-    if( relayState == HIGH && probeTempF > (dayTemp + 2) ) {
-      relayState = LOW;
-      digitalWrite(RELAY_PIN, LOW);
-    }
-    if(relayState == LOW && probeTempF < (morningTemp - 2) ) {
-      relayState = HIGH;
-      digitalWrite(RELAY_PIN, HIGH);
-    }
-  }
-  */
   if( currentHour >= 7 && currentHour <= 21 ) {
     if( relayState == HIGH && probeTempF > (dayTemp + 2) ) {
       relayState = LOW;
@@ -215,51 +266,52 @@ void loop(){
       digitalWrite(RELAY_PIN, HIGH);
     }
   }
+
+  // update display with outlet and pump state
   display.setCursor(0,50);
   String state = relayState == LOW ? "Off" : "On";
   String outletMsg = "Outlet: " + state;
   display.println(outletMsg);
+  
+  display.setCursor(65,50);
+  String pState = pumpState == LOW ? "Off" : "On";
+  String pumpMsg = "Pump: " + pState;
+  display.println(pumpMsg);
+  
   display.display();
   
+  // serialize JSON document to publish to MQTT topic
   StaticJsonDocument<150> doc;
   char readingsJson[256];
 
   doc["outletState"] = relayState;
+  doc["pumpState"] = pumpState;
   doc["airTemp"] = cToF(DHT.temperature);
   doc["soilTemp"] = probeTempF;
   doc["humidity"] = DHT.humidity;
   doc["moisture"] = moisturePct;
+  doc["waterTarget"] = waterLow;
   doc["light"] = lux;
   
   serializeJson(doc, readingsJson);
-  
   TelnetStream.println(readingsJson);
-  MQTT_connect();
-  readingsTopic.publish(readingsJson);
-  delay(10000);
+
+  // publish JSON document to MQTT
+  mqttClient.loop();
+  mqttClient.publish(greenthumbTopic, readingsJson);
+  delay(1000); // 10000
 }
 
-// courtesy of https://www.electronicwings.com/nodemcu/nodemcu-mqtt-client-with-arduino-ide
-void MQTT_connect() {
-  int8_t ret;
-  if (mqtt.connected()) {
-    return;
-  }
-  TelnetStream.print("Connecting to MQTT... ");
-  uint8_t retries = 3;
-  while ((ret = mqtt.connect()) != 0) {
-       TelnetStream.println(mqtt.connectErrorString(ret));
-       TelnetStream.println("Retrying MQTT connection in 5 seconds...");
-       mqtt.disconnect();
-       delay(5000);
-       retries--;
-       if (retries == 0) {
-         while (1);
-       }
-  }
-  TelnetStream.println("MQTT Connected!");
-}
-
+// convenience function to convert celsius to fahrenheit
 float cToF(float c) {
   return (c*1.8)+32;
+}
+
+// handle rotary encoder change
+ICACHE_RAM_ATTR void updateEncoder() {
+  int a = digitalRead(ENCODER_1);
+  int b = digitalRead(ENCODER_2);
+  if( a==b ) return;
+  if( a<b && waterLow > 0 ) waterLow = waterLow - 5;
+  if( a>b && waterLow < 100 ) waterLow = waterLow + 5;
 }
