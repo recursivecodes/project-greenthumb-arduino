@@ -171,7 +171,6 @@ void setup(){
 
 void loop(){
   ArduinoOTA.handle();
-
   timeClient.update();
   
   // read air temp & humidity
