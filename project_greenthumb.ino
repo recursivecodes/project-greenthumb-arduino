@@ -1,3 +1,4 @@
+// include libraries
 #include <ESP8266WiFi.h> 
 #include <dht.h>
 #include <SPI.h>
@@ -16,6 +17,7 @@
 #include <TelnetStream.h>
 #include "creds.h"
 
+// define variables
 #define SCREEN_WIDTH 128 
 #define SCREEN_HEIGHT 64 
 #define OLED_RESET LED_BUILTIN 
@@ -27,19 +29,17 @@
 #define WATER_SENSOR A0
 #define OLED_SCL D7
 #define OLED_SDA D8
-
 #define S0 D0
 #define S1 D7
 #define S2 D8
 #define S3 D3
 #define SIG A0 
-
 #define ENCODER_1 D3
 #define ENCODER_2 D5
 
+// global variables 
 volatile int lastEncoded = 0;
 volatile long waterLow = 50;
-
 const long utcOffsetInSeconds = -18000;
 long pumpStart = 0;
 long pumpDuration = 5000;
@@ -47,12 +47,9 @@ long pumpDelay = 10000;
 int pumpState = LOW;
 int dayTemp = 80;
 int nightTemp = 70;
-int incomingByte = 0;
 int light;
 int moisture;
 int relayState;
-
-// global variables 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 dht DHT;
 OneWire oneWire(PROBE_THERMOMETER);
